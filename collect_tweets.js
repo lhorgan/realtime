@@ -2,14 +2,60 @@ const lineByLine = require('n-readlines');
 const request = require("request");
 var AWS = require('aws-sdk');
 AWS.config.update({region: "us-west-1"});
+const asyncRedis = require("async-redis");
 
 class TweetFetcher {
-    constructor() {
-        let lambdaNum = parseInt(Math.random() * 100);
-        this.getTweets(`twint_gamma_${1}`, "potus44", 20);
+    constructor(lambdaCount, lambdaBaseName) {
+        //let lambdaNum = parseInt(Math.random() * 100);
+        this.lambdaBaseName = lambdaBaseName;
+        this.lambdaCount = lambdaCount;
+        this.client = asyncRedis.createClient();
+        //this.getTweets(`twint_gamma_${1}`, "potus44", 20);
+
+        this.usernames = [];
+        this.limit = 100;
+    }
+
+    mainLoop() {
+        setInterval(async () => {
+            let newLength = await this.client.llen("id_to_username");
+            console.log("The new length of the usernames list is " + newLength);
+            if(newLength > this.usernames.length) {
+                console.log("Okay, adding these usernames");
+                let newItemsCount = newLength - this.usernames.length;
+                let newItems = await this.client.lrange("id_to_username", 0, newItemsCount - 1);
+                console.log(newItems);
+                let newUsernames = newItems.map(x => x.split("\t")[1]);
+                //console.log(newUsernames);
+                this.usernames = this.usernames.concat(newUsernames);
+
+                for(let i = 0; i < newUsernames.length; i++) {
+                    let payload = {
+                        "Username": newUsernames[i],
+                        "Limit": this.limit,
+                        "Store_object": true
+                    };
+                    this.client.lpush("payloads", JSON.stringify(payload));
+                }
+            }
+        }, 1000); // once per second, check for new usernames
+
+        let lambdaIndex = 0;
+        setInterval(async () => {
+            let payload = await this.client.lpop("payloads");
+            payload = JSON.parse(payload);
+            if(payload) {
+                let lambdaName = this.lambdaBaseName + lambdaIndex;
+                if(payload) {
+                    this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Until);
+                }
+                lambdaIndex = ++lambdaIndex % this.lambdaCount;
+            }
+        }, 5000);
     }
 
     getTweets(lambdaName, username, limit, until) {
+        console.log("FETCHING TWEETS THROUGH " + lambdaName);
         let payload = {
             "Username": username,
             "Limit": limit,
@@ -20,6 +66,8 @@ class TweetFetcher {
             payload["Until"] = until;
         }
         
+        console.log(payload);
+
         var params = {
             FunctionName: lambdaName,
             Payload: JSON.stringify(payload)
@@ -35,19 +83,13 @@ class TweetFetcher {
             }
             else {
                 console.log("we successed");
-                //console.log(data);
-                //lambdaResp = JSON.parse(data["Payload"])
-                //console.log(data["Payload"]);
-                //console.log(typeof(data["Payload"]));
                 let res = data["Payload"];
-                //console.log(res);
                 res = JSON.parse(res);
-                console.log(res);
-                //console.log(res.length);
+                //console.log(res);
                 for(let i = 0; i < res.length; i++) {
                     let timestamp = res[i].datestamp + " " + res[i].timestamp;
-                    console.log(timestamp);
-                    console.log(res[i].id_str);
+                    //console.log(timestamp);
+                    //console.log(res[i].id_str);
                 }
                 //cb(res);
             }
@@ -55,5 +97,5 @@ class TweetFetcher {
     }
 }
 
-//let t = new TweetFetcher();
-let e = new I("/home/luke/Documents/lazer/id_to_username/latest_sinceid_file_high_active.tsv", "http://3.80.160.1:5000");
+let t = new TweetFetcher(500, "twint_gamma_");
+t.mainLoop();
