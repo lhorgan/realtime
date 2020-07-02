@@ -1,12 +1,11 @@
 const puppeteer = require('puppeteer');
 const lineByLine = require('n-readlines');
-
 const asyncRedis = require("async-redis");
-const client = asyncRedis.createClient();
 
 class I {
     constructor(ifname, proxies) {
         this.browsers = [];
+        this.client = asyncRedis.createClient();
 
         (async () => {
             for(let i = 0; i < proxies.length; i++) {
@@ -14,7 +13,8 @@ class I {
                 this.browsers.push(await puppeteer.launch({args: args}));
             }
 
-            this.ids = this.readIds(ifname);
+            this.ids = await this.readIds(ifname);
+
             await this.processIds();
 
             for(let i = 0; i < proxies.length; i++) {
@@ -31,6 +31,8 @@ class I {
             let username = url.split("/").pop();
             console.log(username);
             page.close();
+            await this.client.lpush("id_to_username", `${this.ids[i]}\t${username}`);
+            await this.client.lpush("processed_user_ids", this.ids[i]);
             //await this.rest(parseInt(20000 + Math.random() * 20000));
         }
     }
@@ -43,15 +45,22 @@ class I {
         });
     }
 
-    readIds(ifname) {
+    async readIds(ifname) {
         let list = [];
         let readstream = new lineByLine(ifname);
+
+        let alreadyProcessed = new Set([await this.client.lrange("processed_user_ids", 0, -1)]);
         
         while(true) {
             let line = readstream.next();
             if(!line) break;
+            
             line = line.toString("ascii");
-            list.push(line.split("\t")[0]);
+            let userID = line.split("\t")[0];
+
+            if(!alreadyProcessed.has(userID)) {
+                list.push(userID);
+            }
         }
     
         return list;
