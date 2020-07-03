@@ -1,15 +1,16 @@
 const lineByLine = require('n-readlines');
-const request = require("request");
 var AWS = require('aws-sdk');
 AWS.config.update({region: "us-west-1"});
 const asyncRedis = require("async-redis");
+const fs = require("fs");
 
 class TweetFetcher {
-    constructor(lambdaCount, lambdaBaseName) {
+    constructor(lambdaCount, lambdaBaseName, outputDir) {
         //let lambdaNum = parseInt(Math.random() * 100);
         this.lambdaBaseName = lambdaBaseName;
         this.lambdaCount = lambdaCount;
         this.client = asyncRedis.createClient();
+        this.outputDir = outputDir;
         //this.getTweets(`twint_gamma_${1}`, "potus44", 20);
 
         this.usernames = [];
@@ -19,7 +20,7 @@ class TweetFetcher {
     mainLoop() {
         setInterval(async () => {
             let newLength = await this.client.llen("id_to_username");
-            console.log("The new length of the usernames list is " + newLength);
+            //console.log("The new length of the usernames list is " + newLength);
             if(newLength > this.usernames.length) {
                 console.log("Okay, adding these usernames");
                 let newItemsCount = newLength - this.usernames.length;
@@ -60,7 +61,7 @@ class TweetFetcher {
             "Username": username,
             "Limit": limit,
             "Store_object": true
-        }
+        };
 
         if(until) {
             payload["Until"] = until;
@@ -75,27 +76,35 @@ class TweetFetcher {
 
         var lambda = new AWS.Lambda();
         lambda.invoke(params, (err, data) => {
-            let lambdaResp = {};
-
             if(err) {
                 console.log("There was an error");
-                lambdaResp["error"] = true;
+                this.client.lpush("payloads", JSON.stringify(payload));
             }
             else {
                 console.log("we successed");
                 let res = data["Payload"];
                 res = JSON.parse(res);
-                //console.log(res);
-                for(let i = 0; i < res.length; i++) {
-                    let timestamp = res[i].datestamp + " " + res[i].timestamp;
-                    //console.log(timestamp);
-                    //console.log(res[i].id_str);
+                
+                if(res.length > 0) {
+                    let timestamp = res[res.length - 1].datestamp + " " + res[res.length - 1].timestamp;
+
+                    let ofname = `${this.outputDir}/${username}.txt`;
+                    var stream = fs.createWriteStream(ofname, {flags:'a'});                
+                    for(let i = 0; i < res.length; i++) {
+                        stream.write(`${res[i]}\n`);
+                    }
+                    stream.end();
+
+                    payload["Until"] = timestamp;
+                    this.client.lpush("payloads", JSON.stringify(payload));
                 }
-                //cb(res);
+                else {
+                    console.log("We're done with " + username);
+                }
             }
         });
     }
 }
 
-let t = new TweetFetcher(500, "twint_gamma_");
+let t = new TweetFetcher(500, "twint_gamma_", "../results");
 t.mainLoop();
