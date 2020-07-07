@@ -15,10 +15,11 @@ class TweetFetcher {
 
         this.usernames = [];
         this.limit = 100;
+        this.totals = {};
     }
 
-    mainLoop() {
-        setInterval(async () => {
+    async mainLoop() {
+        let intv = setInterval(async () => {
             let newLength = await this.client.llen("id_to_username");
             //console.log("The new length of the usernames list is " + newLength);
             if(newLength > this.usernames.length) {
@@ -31,43 +32,88 @@ class TweetFetcher {
                 this.usernames = this.usernames.concat(newUsernames);
 
                 for(let i = 0; i < newUsernames.length; i++) {
-                    let payload = {
-                        "Username": newUsernames[i],
-                        "Limit": this.limit,
-                        "Store_object": true
-                    };
-                    this.client.lpush("payloads", JSON.stringify(payload));
+                    let latestTimestamp = await this.client.get(`timestamps_${newUsernames[i]}`);
+                    if(latestTimestamp) {
+                        console.log(`${newUsernames[i]} is already in the database.`);
+                    }
+                    else {
+                        let payload = {
+                            "Username": newUsernames[i],
+                            "Limit": this.limit,
+                            "Store_object": true
+                        };
+                        this.client.lpush("payloads", JSON.stringify(payload));
+                    }
                 }
             }
+
+            clearInterval(intv); // we only wanna do it once since we got all the names already
         }, 1000); // once per second, check for new usernames
+        
+        // let un = [];
+        // for(let i = 0; i < 5; i++) {
+        //     un.push(this.usernames[i]);
+        // }
+        // this.usernames = un;
+
+        // Restore pending requests
+        let pending = await this.client.smembers("pending");
+        for(let i = 0; i < pending.length; i++) {
+            console.log("Restoring pending payload " + pending[i]);
+            let payload = await this.client.get(`pending_${pending[i]}`);
+            this.client.lpush("payloads", payload);
+        }
+        
+        this.client.del("pending");
+        for(let i = 0; i < pending.length; i++) {
+            this.client.del(`pending_${pending[i]}`);
+        }
 
         let lambdaIndex = 0;
         setInterval(async () => {
             let payload = await this.client.lpop("payloads");
-            payload = JSON.parse(payload);
             if(payload) {
+                payload = JSON.parse(payload);
+                this.backup(payload);
+
                 let lambdaName = this.lambdaBaseName + lambdaIndex;
                 if(payload) {
-                    this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Until);
+                    this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Resume);
                 }
                 lambdaIndex = ++lambdaIndex % this.lambdaCount;
             }
-        }, 5000);
+        }, 50);
     }
 
-    getTweets(lambdaName, username, limit, until) {
-        console.log("FETCHING TWEETS THROUGH " + lambdaName);
+    backup(payload) {
+        //console.log("BACKING UP PAYLOAD " + typeof(payload));
+        //console.log(payload);
+        let key = `pending_${payload.Username}`;
+        //console.log(payload.Username + "is pending");
+
+        this.client.sadd("pending", key); // note this is pending with some uid that we store here, and set in the big database
+        this.client.set(key, JSON.stringify(payload));
+    }
+
+    unbackup(username) {
+        let key = `pending_${username}`;
+        this.client.srem("pending", key);
+        this.client.del(key);
+    }
+
+    getTweets(lambdaName, username, limit, resume) {
+        //console.log("FETCHING TWEETS THROUGH " + lambdaName + " with limit " + limit);
         let payload = {
             "Username": username,
             "Limit": limit,
             "Store_object": true
         };
 
-        if(until) {
-            payload["Until"] = until;
+        if(resume) {
+            payload["Resume"] = resume;
         }
         
-        console.log(payload);
+        //console.log(payload);
 
         var params = {
             FunctionName: lambdaName,
@@ -75,36 +121,59 @@ class TweetFetcher {
         };
 
         var lambda = new AWS.Lambda();
+        
+        var d = new Date();
+        var n = d.getTime();
+
         lambda.invoke(params, (err, data) => {
             if(err) {
-                console.log("There was an error");
+                d = new Date();
+                console.log("There was an error for " + username + " through " + lambdaName + " after " + ((d.getTime() - n)));
+                console.log(err);
                 this.client.lpush("payloads", JSON.stringify(payload));
             }
             else {
-                console.log("we successed");
+                d = new Date();
+                console.log("Victory for " + username + " in " + (d.getTime() - n) + " with " + lambdaName + ".");
                 let res = data["Payload"];
                 res = JSON.parse(res);
                 
-                if(res.length > 0) {
-                    let timestamp = res[res.length - 1].datestamp + " " + res[res.length - 1].timestamp;
+                let tweets = res["tweets_list"];
+                if(tweets.length > 0) {
+                    if(!(username in this.totals)) {
+                        this.totals[username] = 0;
+                    }
+                    this.totals[username] += tweets.length;
+
+                    console.log("Fetched " + tweets.length + " tweets for " + username + ", bringing their total to " + this.totals[username]);
+                    //console.log("Here's the first one: ");
+                    //console.log(tweets[0]);
+
+                    //console.log("\n");
+                    let timestamp = tweets[tweets.length - 1].datestamp + " " + tweets[tweets.length - 1].timestamp;
 
                     let ofname = `${this.outputDir}/${username}.txt`;
                     var stream = fs.createWriteStream(ofname, {flags:'a'});                
-                    for(let i = 0; i < res.length; i++) {
-                        stream.write(`${res[i]}\n`);
+                    for(let i = 0; i < tweets.length; i++) {
+                        stream.write(`${JSON.stringify(tweets[i])}\n`);
                     }
                     stream.end();
 
-                    payload["Until"] = timestamp;
+                    payload["Resume"] = res["Resume"]; //timestamp;
                     this.client.lpush("payloads", JSON.stringify(payload));
+                    this.client.set(`timestamps_${username}`, timestamp);
                 }
                 else {
                     console.log("We're done with " + username);
                 }
             }
+
+            this.unbackup(username);
         });
     }
 }
 
-let t = new TweetFetcher(500, "twint_gamma_", "../results");
-t.mainLoop();
+(async () => {
+    let t = new TweetFetcher(1000, "twint_gamma_", "../big_drive/results");
+    await t.mainLoop();
+})();
