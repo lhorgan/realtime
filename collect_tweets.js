@@ -8,6 +8,7 @@ class TweetFetcher {
     constructor(lambdaCount, lambdaBaseName, outputDir) {
         //let lambdaNum = parseInt(Math.random() * 100);
         this.lambdaBaseName = lambdaBaseName;
+        this.idling = [];
         this.lambdaCount = lambdaCount;
         this.client = asyncRedis.createClient();
         this.outputDir = outputDir;
@@ -19,42 +20,30 @@ class TweetFetcher {
     }
 
     async mainLoop() {
-        let intv = setInterval(async () => {
-            let newLength = await this.client.llen("id_to_username");
-            //console.log("The new length of the usernames list is " + newLength);
-            if(newLength > this.usernames.length) {
-                console.log("Okay, adding these usernames");
-                let newItemsCount = newLength - this.usernames.length;
-                let newItems = await this.client.lrange("id_to_username", 0, newItemsCount - 1);
-                console.log(newItems);
-                let newUsernames = newItems.map(x => x.split("\t")[1]);
-                //console.log(newUsernames);
-                this.usernames = this.usernames.concat(newUsernames);
+        let newLength = await this.client.llen("id_to_username");
+        //console.log("The new length of the usernames list is " + newLength);
+        console.log("Okay, adding these usernames");
+        let newItemsCount = newLength - this.usernames.length;
+        let newItems = await this.client.lrange("id_to_username", 0, newItemsCount - 1);
+        console.log(newItems);
+        let newUsernames = newItems.map(x => x.split("\t")[1]);
+        //console.log(newUsernames);
+        this.usernames = this.usernames.concat(newUsernames);
 
-                for(let i = 0; i < newUsernames.length; i++) {
-                    let latestTimestamp = await this.client.get(`timestamps_${newUsernames[i]}`);
-                    if(latestTimestamp) {
-                        console.log(`${newUsernames[i]} is already in the database.`);
-                    }
-                    else {
-                        let payload = {
-                            "Username": newUsernames[i],
-                            "Limit": this.limit,
-                            "Store_object": true
-                        };
-                        this.client.lpush("payloads", JSON.stringify(payload));
-                    }
-                }
+        for(let i = 0; i < newUsernames.length; i++) {
+            let latestTimestamp = await this.client.get(`timestamps_${newUsernames[i]}`);
+            if(latestTimestamp) {
+                console.log(`${newUsernames[i]} is already in the database.`);
             }
-
-            clearInterval(intv); // we only wanna do it once since we got all the names already
-        }, 1000); // once per second, check for new usernames
-        
-        // let un = [];
-        // for(let i = 0; i < 5; i++) {
-        //     un.push(this.usernames[i]);
-        // }
-        // this.usernames = un;
+            else {
+                let payload = {
+                    "Username": newUsernames[i],
+                    "Limit": this.limit,
+                    "Store_object": true
+                };
+                this.client.lpush("payloads", JSON.stringify(payload));
+            }
+        }
 
         // Restore pending requests
         let pending = await this.client.smembers("pending");
@@ -69,20 +58,62 @@ class TweetFetcher {
             this.client.del(`pending_${pending[i]}`);
         }
 
-        let lambdaIndex = 0;
-        setInterval(async () => {
-            let payload = await this.client.lpop("payloads");
-            if(payload) {
-                payload = JSON.parse(payload);
-                this.backup(payload);
+        // let lambdaIndex = 0;
+        // setInterval(async () => {
+        //     let payload = await this.client.lpop("payloads");
+        //     if(payload) {
+        //         payload = JSON.parse(payload);
+        //         this.backup(payload);
 
-                let lambdaName = this.lambdaBaseName + lambdaIndex;
-                if(payload) {
-                    this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Resume);
-                }
-                lambdaIndex = ++lambdaIndex % this.lambdaCount;
+        //         let lambdaName = this.lambdaBaseName + lambdaIndex;
+        //         if(payload) {
+        //             this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Resume);
+        //         }
+        //         lambdaIndex = ++lambdaIndex % this.lambdaCount;
+        //     }
+        // }, 50);
+        for(let lambdaIndex = 0; lambdaIndex < this.lambdaCount; lambdaIndex++) {
+            let payload = await this.client.lpop("payloads");
+            payload = JSON.parse(payload);
+            this.backup(payload);
+
+            let lambdaName = this.lambdaBaseName + lambdaIndex;
+            if(payload) {
+                this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Resume);
             }
-        }, 50);
+            this.wait(25);
+        }
+
+        this.slothIsASin();
+    }
+    
+    wait(ms) {
+        return new Promise((resolve, reject) => {
+            setTimeout(() => {
+                resolve();
+            }, ms)
+        });
+    }
+
+    slothIsASin() {
+        // may no Labmda rest, EVER!  Unless it's Sunday.
+        setInterval(async () => {
+            if(this.idling.length > 0) {
+                let lambdaName = this.idling.shift();
+                console.log(lambdaName + " is idle.");
+                let payload = await this.client.lpop("payloads");
+                if(payload) {
+                    payload = JSON.parse(payload);
+                    this.backup(payload);
+                    if(payload) {
+                        this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Resume);
+                    }
+                }
+                else {
+                    this.idling.push(lambdaName);
+                }
+            }
+        }, 25);
     }
 
     backup(payload) {
@@ -126,6 +157,8 @@ class TweetFetcher {
         var n = d.getTime();
 
         lambda.invoke(params, (err, data) => {
+            this.idling.push(lambdaName); // this lambda is now available
+
             if(err) {
                 d = new Date();
                 console.log("There was an error for " + username + " through " + lambdaName + " after " + ((d.getTime() - n)));
