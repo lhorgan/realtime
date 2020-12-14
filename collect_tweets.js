@@ -1,5 +1,12 @@
+async function sleep(ms) {
+    return new Promise((accept, reject) => {
+        setTimeout(accept, ms);
+    });
+}
+
 const lineByLine = require('n-readlines');
 var AWS = require('aws-sdk');
+const express = require("express");
 AWS.config.update({region: "us-west-1"});
 const asyncRedis = require("async-redis");
 const fs = require("fs");
@@ -67,8 +74,8 @@ class Lambda {
                 }
             })
             .catch(err => {
-                console.log(err);
-                console.log("Something seems to have gone wrong...");
+                //console.log(err);
+                //console.log("Something seems to have gone wrong...");
                 for(let reqID in cbDict) {
                     cbDict[reqID]("REQUEST ERROR ON OUR END", null);
                 }
@@ -78,51 +85,107 @@ class Lambda {
 }
 
 class TweetFetcher {
-    constructor(lambdaCount, lambdaBaseName, outputDir) {
+    constructor(lambdaCount, lambdaBaseName, inputFile, outputDir) {
         //let lambdaNum = parseInt(Math.random() * 100);
         this.lambdaBaseName = lambdaBaseName;
         this.idling = [];
         this.lambdaCount = lambdaCount;
         this.client = asyncRedis.createClient();
         this.outputDir = outputDir;
+        this.inputFile = inputFile;
         //this.getTweets(`twint_gamma_${1}`, "potus44", 20);
 
         this.usernames = [];
         this.limit = 100;
         this.totals = {};
 
-        this.lbda = new Lambda();
+        this.app = express();
+        this.app.use(express.json());
+        this.server = require('http').createServer(this.app);
+        this.port = 3050;
+
+        this.headersList = [];
+        this.headersDict = {};
+        this.headersCount = 500; // we'll go for 500 right now
+        this.headersIndex = 0;
+
+        this.prevHandles = {};
+
+        //this.lbda = new Lambda(); // CRITICAL PUT THIS BACK!
     }
 
     async mainLoop() {
         let readstream = new lineByLine(this.inputFile);
-        let line = this.readstream.next();
+        let line = readstream.next();
         let ctr = 0;
-        while((line = this.readstream.next())/* && ctr++ < 30000*/) {
+        while((line = readstream.next()) && ctr++ < 300) {
             //console.log(line.toString());
-            let comps =  line.toString().split("\t")[2];
-            //console.log(handle);
+            //console.log(line.toString());
+            let comps =  line.toString().split("\t");
             let payload = {
-                "id": comps[0],
+                "uid": comps[0],
                 "handle": comps[2] 
             }
-            await this.client.lpush(JSON.stringify(payload));
+            //console.log(payload);
+            await this.client.lpush("payloads", JSON.stringify(payload));
         }
 
-        for(let lambdaIndex = 0; lambdaIndex < this.lambdaCount; lambdaIndex++) {
-            let payload = await this.client.lpop("payloads");
-            payload = JSON.parse(payload);
-            this.backup(payload);
+        // for(let lambdaIndex = 0; lambdaIndex < this.lambdaCount; lambdaIndex++) {
+        //     let payload = await this.client.lpop("payloads");
+        //     payload = JSON.parse(payload);
+        //     this.backup(payload);
 
-            let lambdaName = this.lambdaBaseName + lambdaIndex;
-            if(payload) {
-                this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Resume);
-            }
-            await this.wait(25);
-        }
+        //     let lambdaName = this.lambdaBaseName + lambdaIndex;
+        //     if(payload) {
+        //         this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Resume);
+        //     }
+        //     await this.wait(25);
+        // }
 
         this.slothIsASin();
     }
+
+    listenHTTP() {
+        //console.log("SERVER LISTENING ON " + this.port);
+        // Listen on the port specified in console args
+        this.server.listen(this.port, ()  => {});
+
+        let firstGo = true;
+        let ctr = 0;
+        /**
+         */
+        this.app.post("/credentials", async (req, res) => {
+            //console.log(req.body);
+
+            let headers = req.body.headers;
+            let url = req.body.url;
+            
+            //console.log(headers);
+
+            if("x-csrf-token" in headers) {
+                //console.log("WE HAVE SOME HEADERS! " + headers["x-csrf-token"]);;
+                if(!(headers["x-csrf-token"] in this.headersDict)) {
+                    //console.log("AND THEY ARE NEW");
+                    this.headersDict[headers["x-csrf-token"]] = {headers, url};
+                    this.headersList[this.headersIndex] = {headers, url};
+                    let lambdaName = this.lambdaBaseName + this.headersIndex;
+                    this.headersIndex = (this.headersIndex + 1) % this.headersCount;
+                    
+                    
+                    if(++ctr >= this.headersCount) {
+                        firstGo = false;
+                    }
+
+                    if(firstGo === true) {
+                        //console.log("setting " + lambdaName + " to idling...");
+                        this.idling.push(lambdaName); // this server is ready to go!
+                    }
+                }
+            }
+
+            res.send({"status": 200});
+        });
+    }    
     
     wait(ms) {
         return new Promise((resolve, reject) => {
@@ -132,25 +195,48 @@ class TweetFetcher {
         });
     }
 
-    slothIsASin() {
+    async slothIsASin() {
         // may no Labmda rest, EVER!  Unless it's Sunday.
-        setInterval(async () => {
+        // setInterval(async () => {
+        //     if(this.idling.length > 0) {
+        //         let lambdaName = this.idling.shift();
+        //         //console.log(lambdaName + " is idle.");
+        //         let payload = await this.client.lpop("payloads");
+        //         if(payload) {
+        //             payload = JSON.parse(payload);
+        //             this.backup(payload);
+        //             if(payload) {
+        //                 this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Resume);
+        //             }
+        //         }
+        //         else {
+        //             this.idling.push(lambdaName);
+        //         }
+        //     }
+        // }, 25);
+        while(true) {
             if(this.idling.length > 0) {
                 let lambdaName = this.idling.shift();
-                //console.log(lambdaName + " is idle.");
+                let lambdaNum = lambdaName.split("_");
+                lambdaNum = parseInt(lambdaNum[lambdaNum.length - 1]);
                 let payload = await this.client.lpop("payloads");
                 if(payload) {
                     payload = JSON.parse(payload);
-                    this.backup(payload);
-                    if(payload) {
-                        this.getTweets(lambdaName, payload.Username, payload.Limit, payload.Resume);
-                    }
+                    let headers = this.headersList[lambdaNum];
+                    //console.log("Here is our payload:");
+                    //console.log(payload);
+                    //console.log("Here are our headers");
+                    //console.log(headers);
+                    //console.log("\n\n");
+
+                    this.getTweets(payload, headers, lambdaName);
                 }
                 else {
                     this.idling.push(lambdaName);
                 }
             }
-        }, 25);
+            await sleep(100);
+        }
     }
 
     backup(payload) {
@@ -166,37 +252,45 @@ class TweetFetcher {
         this.client.del(key);
     }
 
-    getTweets(lambdaName, username, limit, resume) {
-        let payload = {
-            "Username": username,
-            "Limit": limit,
-            "Store_object": true
-        };
-
-        if(resume) {
-            payload["Resume"] = resume;
+    getTweets(payload, config, lambdaName) {
+        payload.config = config;
+        let prevHandle = this.prevHandles[lambdaName];
+        let username = payload.username; // same as handle
+        if(prevHandle) {
+            payload.config.headers.referer = `https://twitter.com/${prevHandle}`;
         }
+        this.prevHandles[lambdaName] = username; 
+
+        //console.log(payload);
+
+        let finalPayload = {
+            "uid": payload.uid,
+            "url": payload.config.url,
+            "headers": payload.config.headers,
+            "handle": payload.handle
+        }
+        console.log(JSON.stringify(finalPayload));
 
         var params = {
             FunctionName: lambdaName,
-            Payload: JSON.stringify(payload)
+            Payload: JSON.stringify(finalPayload)
         };
         
         var d = new Date();
         var n = d.getTime();
-
+        return;
         this.lbda.invoke(params, (err, data) => {
             this.idling.push(lambdaName); // this lambda is now available
 
             if(err) {
                 d = new Date();
-                console.log("There was an error for " + username + " through " + lambdaName + " after " + ((d.getTime() - n)));
-                console.log(err);
+                //console.log("There was an error for " + username + " through " + lambdaName + " after " + ((d.getTime() - n)));
+                //console.log(err);
                 this.client.lpush("payloads", JSON.stringify(payload));
             }
             else {
                 d = new Date();
-                console.log("Victory for " + username + " in " + (d.getTime() - n) + " with " + lambdaName + ".");
+                //console.log("Victory for " + username + " in " + (d.getTime() - n) + " with " + lambdaName + ".");
                 let res = data["Payload"];
                 res = JSON.parse(res);
             }
@@ -207,6 +301,7 @@ class TweetFetcher {
 }
 
 (async () => {
-    let t = new TweetFetcher(1000, "twint_gamma_", "../big_drive/results");
+    let t = new TweetFetcher(1000, "twint_gamma_", "/home/luke/Documents/lazer/achtung/id_handle_mapping.tsv", "./results");
     await t.mainLoop();
+    t.listenHTTP();
 })();
