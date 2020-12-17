@@ -24,11 +24,11 @@ function randomString() {
  */
 class Lambda {
     constructor() {
-        this.servers = ["http://127.0.0.1:8081"];
+        this.relays = ["http://127.0.0.1:8081"];
 
         this.pending = [];
         this.interval = 5000;
-        this.sendLength = 2;
+        this.sendLength = 5;
         this.process();
     }
 
@@ -44,12 +44,16 @@ class Lambda {
         return response;
     }
 
+    randomChoice(arr) {
+        return arr[Math.floor(Math.random() * arr.length)];
+    }
+
     process() {
         setInterval(() => {
             let toSend = {"payloads": []};
             let cbDict = {};
 
-            if(this.pending.length > this.sendLength) {
+            if(this.pending.length >= this.sendLength) {
                 for(let i = 0; i < this.sendLength; i++) {
                     let id = randomString();
                     let [params, cb] = this.pending[i];
@@ -59,7 +63,7 @@ class Lambda {
                 this.pending = this.pending.slice(this.sendLength, this.pending.length);
             }
 
-            let server = this.servers[0];
+            let server = this.relays[0];
             fetch(server + "/payloads", {
                 method: "post",
                 body: JSON.stringify(toSend),
@@ -81,6 +85,43 @@ class Lambda {
                 }
             });            
         }, this.interval);
+    }
+
+    async getRelays() {
+        let [instances, err] = await h.attempt(this.ec2Util.describeInstances([
+            {
+                Name: `tag:Name`,
+                Values: [`${this.relayNamespace}-relay*`]
+            },
+            {
+                Name: 'instance-state-name',
+                Values: ["running"]
+            },
+        ]));
+
+        if(err) {
+            console.error("Could not load relays.  Aborting.");
+            return;
+        }
+
+        for(let i = 0; i < instances.Reservations.length; i++) {
+            for(let j = 0; j < instances.Reservations[i].Instances.length; j++) {
+                let instance = instances.Reservations[i].Instances[j];
+                //console.log(`Type: ${instance.InstanceType}`);
+                //console.log(`Private IP: ${instance.PrivateIpAddress}`);
+                //console.log(`Public URL: ${instance.PublicDnsName || 'None'}`);
+                //console.log("\n");
+
+                //this.addRelaySocket(`http://${instance.PrivateIpAddress}:${this.relayPort}`);
+                //this.addRelaySocket(`http://${instance.PublicDnsName}:${this.relayPort}`);
+                this.relays.push()
+            }
+        }
+
+        // for(let relayURL in this.relaySockets) {
+        //     this.sendLambdas(relayURL);
+        //     this.sendRelays(relayURL);
+        // }
     }
 }
 
@@ -111,7 +152,7 @@ class TweetFetcher {
 
         this.prevHandles = {};
 
-        //this.lbda = new Lambda(); // CRITICAL PUT THIS BACK!
+        this.lbda = new Lambda(); // CRITICAL PUT THIS BACK!
     }
 
     async mainLoop() {
@@ -146,7 +187,7 @@ class TweetFetcher {
     }
 
     listenHTTP() {
-        //console.log("SERVER LISTENING ON " + this.port);
+        console.log("SERVER LISTENING ON " + this.port);
         // Listen on the port specified in console args
         this.server.listen(this.port, ()  => {});
 
@@ -170,9 +211,11 @@ class TweetFetcher {
                     this.headersList[this.headersIndex] = {headers, url};
                     let lambdaName = this.lambdaBaseName + this.headersIndex;
                     this.headersIndex = (this.headersIndex + 1) % this.headersCount;
-                    
-                    
-                    if(++ctr >= this.headersCount) {
+                    ++ctr;
+
+                    console.log(`Headers index is at ${this.headersIndex} out of ${this.headersCount}, ctr is at ${ctr}, firstGo is ${firstGo}, idling length is ${this.idling.length}`);
+
+                    if(ctr >= this.headersCount) {
                         firstGo = false;
                     }
 
@@ -278,7 +321,7 @@ class TweetFetcher {
         
         var d = new Date();
         var n = d.getTime();
-        return;
+        //return;
         this.lbda.invoke(params, (err, data) => {
             this.idling.push(lambdaName); // this lambda is now available
 
@@ -293,6 +336,8 @@ class TweetFetcher {
                 //console.log("Victory for " + username + " in " + (d.getTime() - n) + " with " + lambdaName + ".");
                 let res = data["Payload"];
                 res = JSON.parse(res);
+                console.log("HERE IS WHAT WE GOT BACK");
+                console.log(res);
             }
 
             this.unbackup(username);
@@ -301,7 +346,7 @@ class TweetFetcher {
 }
 
 (async () => {
-    let t = new TweetFetcher(1000, "twint_gamma_", "/home/luke/Documents/lazer/achtung/id_handle_mapping.tsv", "./results");
+    let t = new TweetFetcher(1000, "hummingbird_", "/home/luke/Documents/lazer/achtung/id_handle_mapping.tsv", "./results");
     await t.mainLoop();
     t.listenHTTP();
 })();
