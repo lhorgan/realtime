@@ -2,7 +2,7 @@ var express = require('express');
 var app = express();
 var bodyParser = require('body-parser')
 var AWS = require('aws-sdk');
-AWS.config.update({region: "us-west-1"});
+AWS.config.update({region: "us-east-1"});
 
 app.use(bodyParser.json({limit: '50mb'}));
 
@@ -22,6 +22,7 @@ class Earl {
             let toSend = req.body.payloads;
             this.collectTweets(toSend, (response) => {
                 console.log("SENDING A RESPONSE");
+                console.log(JSON.stringify(response));
                 res.send(JSON.stringify(response));
             });
         });
